@@ -1211,3 +1211,44 @@ impl_bytes! {
     u32,
     u64,
 }
+
+impl fmt::Display for sys_status::R {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "sys_status:(");
+        if self.irqs() == 0b1 { write!(f, "irqs | "); }
+        if self.cplock() == 0b1 { write!(f, "cplock | "); }
+        if self.esyncr() == 0b1 { write!(f, "esyncr | "); }
+        if self.aat() == 0b1 { write!(f, "aat | "); }
+        if self.txfrb() == 0b1 { write!(f, "txfrb | "); }
+        if self.txprs() == 0b1 { write!(f, "txprs | "); }
+        if self.txphs() == 0b1 { write!(f, "txphs | "); }
+        if self.txfrs() == 0b1 { write!(f, "txfrs | "); }
+        if self.rxprd() == 0b1 { write!(f, "rxprd | "); }
+        if self.rxsfdd() == 0b1 { write!(f, "rxsfdd | "); }
+        if self.ldedone() == 0b1 { write!(f, "ldedone | "); }
+        if self.rxphd() == 0b1 { write!(f, "rxphd | "); }
+        if self.rxphe() == 0b1 { write!(f, "rxphe | "); }
+        if self.rxdfr() == 0b1 { write!(f, "rxdfr | "); }
+        if self.rxfcg() == 0b1 { write!(f, "rxfcg | "); }
+        if self.rxfce() == 0b1 { write!(f, "rxfce | "); }
+        if self.rxrfsl() == 0b1 { write!(f, "rxrfsl | "); }
+        if self.rxrfto() == 0b1 { write!(f, "rxrfto | "); }
+        if self.ldeerr() == 0b1 { write!(f, "ldeerr | "); }
+        if self.rxovrr() == 0b1 { write!(f, "rxovrr | "); }
+        if self.rxpto() == 0b1 { write!(f, "rxpto | "); }
+        if self.gpioirq() == 0b1 { write!(f, "gpioirq | "); }
+        if self.slp2init() == 0b1 { write!(f, "slp2init | "); }
+        if self.rfpll_ll() == 0b1 { write!(f, "rfpll_ll | "); }
+        if self.clkpll_ll() == 0b1 { write!(f, "clkpll_ll | "); }
+        if self.rxsfdto() == 0b1 { write!(f, "rxsfdto | "); }
+        if self.hpdwarn() == 0b1 { write!(f, "hpdwarn | "); }
+        if self.txberr() == 0b1 { write!(f, "txberr | "); }
+        if self.affrej() == 0b1 { write!(f, "affrej | "); }
+        if self.hsrbp() == 0b1 { write!(f, "hsrbp | "); }
+        if self.icrbp() == 0b1 { write!(f, "icrbp | "); }
+        if self.rxrscs() == 0b1 { write!(f, "rxrscs | "); }
+        if self.rxprej() == 0b1 { write!(f, "rxprej | "); }
+        if self.txpute() == 0b1 { write!(f, "txpute | "); }
+        write!(f, ")")
+    }
+}

@@ -667,7 +667,7 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
     /// DWM1001-Dev board, that the `dwm1001` crate has explicit support for
     /// this.
     pub fn wait<'b>(&mut self, buffer: &'b mut [u8])
-        -> nb::Result<Message<'b>, Error<SPI, CS>>
+        -> nb::Result<(Message<'b>, ll::sys_status::R), Error<SPI, CS>>
     {
         // ATTENTION:
         // If you're changing anything about which SYS_STATUS flags are being
@@ -716,6 +716,20 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
         }
 
         // Frame is ready. Continue.
+        // Clear all receive status bits [from deca_device.c]
+        self.ll()
+            .sys_status()
+            .write(|w|
+                       w
+                           .rxdfr(0b1)
+                           .rxfcg(0b1)
+                           .rxprd(0b1)
+                           .rxsfdd(0b1)
+                           .rxphd(0b1)
+
+            )
+            .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
+
 
         // Wait until LDE processing is done. Before this is finished, the RX
         // time stamp is not available.
@@ -733,30 +747,7 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
         // are buggy, the following should never panic.
         let rx_time = Instant::new(rx_time).unwrap();
 
-        // Reset status bits. This is not strictly necessary, but it helps, if
-        // you have to inspect SYS_STATUS manually during debugging.
-        self.ll()
-            .sys_status()
-            .write(|w|
-                w
-                    .rxprd(0b1)   // Receiver Preamble Detected
-                    .rxsfdd(0b1)  // Receiver SFD Detected
-                    .ldedone(0b1) // LDE Processing Done
-                    .rxphd(0b1)   // Receiver PHY Header Detected
-                    .rxphe(0b1)   // Receiver PHY Header Error
-                    .rxdfr(0b1)   // Receiver Data Frame Ready
-                    .rxfcg(0b1)   // Receiver FCS Good
-                    .rxfce(0b1)   // Receiver FCS Error
-                    .rxrfsl(0b1)  // Receiver Reed Solomon Frame Sync Loss
-                    .rxrfto(0b1)  // Receiver Frame Wait Timeout
-                    .ldeerr(0b1)  // Leading Edge Detection Processing Error
-                    .rxovrr(0b1)  // Receiver Overrun
-                    .rxpto(0b1)   // Preamble Detection Timeout
-                    .rxsfdto(0b1) // Receiver SFD Timeout
-                    .rxrscs(0b1)  // Receiver Reed-Solomon Correction Status
-                    .rxprej(0b1)  // Receiver Preamble Rejection
-            )
-            .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
+
 
         // Read received frame
         let rx_finfo = self.ll()
@@ -781,10 +772,32 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
         let frame = mac::Frame::decode(&buffer[..len], true)
             .map_err(|error| nb::Error::Other(Error::Frame(error)))?;
 
-        Ok(Message {
-            rx_time,
-            frame,
-        })
+        // Reset status bits. This is not strictly necessary, but it helps, if
+        // you have to inspect SYS_STATUS manually during debugging.
+        self.ll()
+            .sys_status()
+            .write(|w|
+                       w
+                           .rxprd(0b1)   // Receiver Preamble Detected
+                           .rxsfdd(0b1)  // Receiver SFD Detected
+                           .ldedone(0b1) // LDE Processing Done
+                           .rxphd(0b1)   // Receiver PHY Header Detected
+                           .rxphe(0b1)   // Receiver PHY Header Error
+                           .rxdfr(0b1)   // Receiver Data Frame Ready
+                           .rxfcg(0b1)   // Receiver FCS Good
+                           .rxfce(0b1)   // Receiver FCS Error
+                           .rxrfsl(0b1)  // Receiver Reed Solomon Frame Sync Loss
+                           .rxrfto(0b1)  // Receiver Frame Wait Timeout
+                           .ldeerr(0b1)  // Leading Edge Detection Processing Error
+                           .rxovrr(0b1)  // Receiver Overrun
+                           .rxpto(0b1)   // Preamble Detection Timeout
+                           .rxsfdto(0b1) // Receiver SFD Timeout
+                           .rxrscs(0b1)  // Receiver Reed-Solomon Correction Status
+                           .rxprej(0b1)  // Receiver Preamble Rejection
+            )
+            .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
+
+        Ok((Message { rx_time, frame }, sys_status))
     }
 
     /// Finishes receiving and returns to the `Ready` state
