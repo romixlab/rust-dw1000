@@ -48,6 +48,65 @@ impl<SPI, CS> DW1000<SPI, CS> {
             chip_select,
         }
     }
+
+    fn block_read(&mut self, id: u8, start_sub_id: u16, buffer: &mut [u8]) -> Result<(), Error<SPI, CS>>
+        where
+            SPI: spi::Transfer<u8> + spi::Write<u8>,
+            CS:  OutputPin,
+    {
+        // Make it simple and use the 3 byte header
+        let header_buffer = [
+            (((start_sub_id as u8) << 6) & 0x40) |  (id & 0x3f),
+            0x80 | (start_sub_id & 0x7F) as u8,
+            ((start_sub_id & 0x7f80) >> 7) as u8
+        ];
+
+        self.chip_select.set_low()
+            .map_err(|err| Error::ChipSelect(err))?;
+        // Send the header
+        self.spi.write(&header_buffer)
+            .map_err(|err| Error::Write(err))?;
+        // Read the data
+        self.spi.transfer(buffer)
+            .map_err(|err| Error::Transfer(err))?;
+        self.chip_select.set_high()
+            .map_err(|err| Error::ChipSelect(err))?;
+
+        Ok(())
+    }
+
+    /// Reads the CIR accumulator.
+    ///
+    /// Starts reading from the start_index and puts all results in the buffer.
+    ///
+    /// *NOTE: The first byte in the buffer will be a dummy byte that shouldn't be used.*
+    pub fn cir(&mut self, start_index: u16, buffer: &mut [u8]) -> Result<(), Error<SPI, CS>>
+        where
+            SPI: spi::Transfer<u8> + spi::Write<u8>,
+            CS:  OutputPin,
+    {
+        self.block_read(0x25, start_index, buffer)
+    }
+
+    /// Allows for an access to the spi type.
+    /// This can be used to change the speed.
+    ///
+    /// In closure you get ownership of the SPI
+    /// so you can destruct it and build it up again if necessary.
+    pub fn access_spi<F>(&mut self, f: F)
+        where F: FnOnce(SPI) -> SPI
+    {
+        // This is unsafe because we create a zeroed spi.
+        // Its safety is guaranteed, though, because the zeroed spi is never used.
+        unsafe {
+            // Create a zeroed spi.
+            let spi = core::mem::zeroed();
+            // Get the spi in the struct.
+            let spi = core::mem::replace(&mut self.spi, spi);
+            // Give the spi to the closure and put the result back into the struct.
+            self.spi = f(spi);
+        }
+    }
 }
 
 
@@ -134,6 +193,7 @@ impl<'s, R, SPI, CS> RegAccessor<'s, R, SPI, CS>
 
         Ok(())
     }
+
 }
 
 
@@ -751,6 +811,13 @@ impl_register! {
         rng,    15, 15, u8; /// Receiver Ranging
         rxprfr, 16, 17, u8; /// RX Pulse Repetition Rate Report
         rxpsr,  18, 19, u8; /// RX Preamble Repetition
+        rxpacc, 20, 31, u16; /// Preamble Accumulation Count
+    }
+    0x12, 0x00, 8, RO, RX_FQUAL(rx_fqual) { /// Rx Frame Quality Information
+        std_noise, 0, 15, u16; /// Standard Deviation of Noise
+        fp_ampl2, 16, 31, u16; /// First Path Amplitude point 2
+        fp_ampl3, 32, 47, u16; /// First Path Amplitude point 3
+        cir_pwr,  48, 63, u16; /// Channel Impulse Response Power
     }
     0x15, 0x00, 14, RO, RX_TIME(rx_time) { /// Receive Time Stamp
         rx_stamp,  0,  39, u64; /// Fully adjusted time stamp
@@ -995,6 +1062,12 @@ impl_register! {
     0x2E, 0x0806, 1, RW, LDE_CFG1(lde_cfg1) { /// LDE Configuration Register 1
         ntm,   0, 4, u8; /// Noise Threshold Multiplier
         pmult, 5, 7, u8; /// Peak Multiplier
+    }
+    0x2E, 0x1000, 2, RO, LDE_PPINDX(lde_ppindx) { /// LDE Peak Path Index
+        value, 0, 15, u16; /// LDE Peak Path Index
+    }
+    0x2E, 0x1002, 2, RO, LDE_PPAMPL(lde_ppampl) { /// LDE Peak Path Amplitude
+        value, 0, 15, u16; /// LDE Peak Path Amplitude
     }
     0x2E, 0x1804, 2, RW, LDE_RXANTD(lde_rxantd) { /// RX Antenna Delay
         value, 0, 15, u16; /// RX Antenna Delay
