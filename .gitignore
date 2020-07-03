@@ -4,3 +4,7 @@
 
 # Sublime Text
 /*.sublime-workspace
+
+# Mac
+.DS_Store
+

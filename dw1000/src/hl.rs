@@ -38,6 +38,7 @@ use crate::{
         RxConfig,
         SfdSequence,
         BitRate,
+        MaximumFrameLength
     },
 };
 
@@ -46,6 +47,7 @@ pub struct DW1000<SPI, CS, State> {
     ll:    ll::DW1000<SPI, CS>,
     seq:   Wrapping<u8>,
     state: State,
+    max_frame_len: MaximumFrameLength,
 }
 
 impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
@@ -67,6 +69,7 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
             ll:    ll::DW1000::new(spi, chip_select),
             seq:   Wrapping(0),
             state: Uninitialized,
+            max_frame_len: MaximumFrameLength::Standard127
         }
     }
 
@@ -80,7 +83,7 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
     /// Please note that this method assumes that you kept the default
     /// configuration. It is generally recommended not to change configuration
     /// before calling this method.
-    pub fn init(mut self) -> Result<DW1000<SPI, CS, Ready>, Error<SPI, CS>> {
+    pub fn init(mut self, max_frame_len: MaximumFrameLength) -> Result<DW1000<SPI, CS, Ready>, Error<SPI, CS>> {
         // Set AGC_TUNE1. See user manual, section 2.5.5.1.
         self.ll.agc_tune1().write(|w| w.value(0x8870))?;
 
@@ -143,10 +146,18 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
             self.ll.ldotune().write(|w| w.value(ldotune))?;
         }
 
+        if max_frame_len == MaximumFrameLength::Decawave1023 {
+            self.ll.sys_cfg().modify(|_, w|
+                w
+                    .phr_mode(0b11)
+            )?;
+        }
+
         Ok(DW1000 {
             ll:    self.ll,
             seq:   self.seq,
             state: Ready,
+            max_frame_len
         })
     }
 }
@@ -204,31 +215,15 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
     /// is in the `Sending` state, and can be used to wait for the transmission
     /// to finish and check its result.
     pub fn send(mut self,
-        data:         &[u8],
-        destination:  mac::Address,
-        delayed_time: Option<Instant>,
-        config: TxConfig,
+                data:         &[u8],
+                destination:  mac::Address,
+                delayed_time: Option<Instant>,
+                config: TxConfig,
     )
-        -> Result<DW1000<SPI, CS, Sending>, Error<SPI, CS>>
+                -> Result<DW1000<SPI, CS, Sending>, Error<SPI, CS>>
     {
-        // Clear event counters
-        self.ll.evc_ctrl().write(|w| w.evc_clr(0b1))?;
-        while self.ll.evc_ctrl().read()?.evc_clr() == 0b1 {}
-
-        // (Re-)Enable event counters
-        self.ll.evc_ctrl().write(|w| w.evc_en(0b1))?;
-        while self.ll.evc_ctrl().read()?.evc_en() == 0b1 {}
-
-        // Sometimes, for unknown reasons, the DW1000 gets stuck in RX mode.
-        // Starting the transmitter won't get it to enter TX mode, which means
-        // all subsequent send operations will fail. Let's disable the
-        // transceiver and force the chip into IDLE mode to make sure that
-        // doesn't happen.
-        self.force_idle()?;
-
         let seq = self.seq.0;
         self.seq += Wrapping(1);
-
         let frame = mac::Frame {
             header: mac::Header {
                 frame_type:      mac::FrameType::Data,
@@ -245,6 +240,34 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
             payload: data,
             footer: [0; 2],
         };
+        let mut buffer = [0u8; 1200];
+        //buffer[0] = 0x09 | 0b1000_000;
+        let len = frame.encode(&mut buffer, mac::WriteFooter::No);
+        self.send_raw(&buffer[0..len], delayed_time, config)
+    }
+
+    /// Send raw data
+    pub fn send_raw(mut self,
+                data:         &[u8],
+                delayed_time: Option<Instant>,
+                config: TxConfig,
+    )
+                -> Result<DW1000<SPI, CS, Sending>, Error<SPI, CS>>
+    {
+        // Clear event counters
+        self.ll.evc_ctrl().write(|w| w.evc_clr(0b1))?;
+        while self.ll.evc_ctrl().read()?.evc_clr() == 0b1 {}
+
+        // (Re-)Enable event counters
+        self.ll.evc_ctrl().write(|w| w.evc_en(0b1))?;
+        while self.ll.evc_ctrl().read()?.evc_en() == 0b1 {}
+
+        // Sometimes, for unknown reasons, the DW1000 gets stuck in RX mode.
+        // Starting the transmitter won't get it to enter TX mode, which means
+        // all subsequent send operations will fail. Let's disable the
+        // transceiver and force the chip into IDLE mode to make sure that
+        // doesn't happen.
+        self.force_idle()?;
 
         delayed_time.map(|time| {
             self.ll
@@ -255,20 +278,32 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
         });
 
         // Prepare transmitter
-        let mut len = 0;
-        self.ll
-            .tx_buffer()
-            .write(|w| {
-                len += frame.encode(&mut w.data(), mac::WriteFooter::No);
-                w
-            })?;
+        let len = data.len();
+        // self.ll
+        //     .tx_buffer()
+        //     .write(|w| {
+        //         unsafe {
+        //             core::ptr::copy(
+        //                 data.as_ptr(),
+        //                 w.data().as_mut_ptr(),
+        //                 len);
+        //         }
+        //         w
+        //     })?;
+        self.ll.write_tx_buffer(data)?;
+
+        // let tfle: u8 = match self.max_frame_len {
+        //     MaximumFrameLength::Standard127 => { 0 },
+        //     MaximumFrameLength::Decawave1023 => { (((len as u16 + 2) >> 7) & 0b111) as u8 },
+        // };
+        let tfle = (((len as u16 + 2) >> 7) & 0b111) as u8;
         self.ll
             .tx_fctrl()
             .modify(|_, w| {
                 let tflen = len as u8 + 2;
                 w
                     .tflen(tflen) // data length + two-octet CRC
-                    .tfle(0)      // no non-standard length extension
+                    .tfle(tfle)   // no non-standard length extension
                     .txboffs(0)   // no offset in TX_BUFFER
                     .txbr(config.bitrate as u8) // configured bitrate
                     .tr(config.ranging_enable as u8) // configured ranging bit
@@ -319,6 +354,7 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
             ll:    self.ll,
             seq:   self.seq,
             state: Sending { finished: false },
+            max_frame_len: self.max_frame_len
         })
     }
 
@@ -455,6 +491,7 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
                 finished: false,
                 used_config: config
             },
+            max_frame_len: self.max_frame_len,
         })
     }
 
@@ -487,7 +524,7 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
                     .mrxpto(0b1)
                     .mrxsfdto(0b1)
                     .maffrej(0b1)
-                    .mldedone(0b1)
+                   // .mldedone(0b1) // user manual page 89: RXDFR won't be fired until LDEDONE
             )?;
 
         Ok(())
@@ -638,6 +675,7 @@ impl<SPI, CS> DW1000<SPI, CS, Sending>
             ll:    self.ll,
             seq:   self.seq,
             state: Ready,
+            max_frame_len: self.max_frame_len,
         })
     }
 
@@ -754,27 +792,34 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
         // are buggy, the following should never panic.
         let rx_time = Instant::new(rx_time).unwrap();
 
-
-
         // Read received frame
         let rx_finfo = self.ll()
             .rx_finfo()
             .read()
             .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
-        let rx_buffer = self.ll()
-            .rx_buffer()
-            .read()
-            .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
+        // Read down below, only required number of bytes
+        // let rx_buffer = self.ll()
+        //     .rx_buffer()
+        //     .read()
+        //     .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
 
-        let len = rx_finfo.rxflen() as usize;
+        let len: usize = match self.max_frame_len {
+            MaximumFrameLength::Standard127 => {
+                rx_finfo.rxflen() as usize
+            },
+            MaximumFrameLength::Decawave1023 => {
+                (((rx_finfo.rxfle() as u16) << 7) | rx_finfo.rxflen() as u16) as usize
+            }
+        };
 
         if buffer.len() < len {
             return Err(nb::Error::Other(
                 Error::BufferTooSmall { required_len: len }
             ))
         }
+        self.ll.read_rx_buffer(&mut buffer[0..len]).map_err(|error| nb::Error::Other(Error::Spi(error)))?;
 
-        buffer[..len].copy_from_slice(&rx_buffer.data()[..len]);
+        //buffer[..len].copy_from_slice(&rx_buffer.data()[..len]);
 
         let frame = mac::Frame::decode(&buffer[..len], true)
             .map_err(|error| nb::Error::Other(Error::Frame(error)))?;
@@ -954,6 +999,7 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
             ll:    self.ll,
             seq:   self.seq,
             state: Ready,
+            max_frame_len: self.max_frame_len,
         })
     }
 }

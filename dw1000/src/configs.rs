@@ -463,3 +463,12 @@ impl UwbChannel {
         }
     }
 }
+
+/// Maximum frame length that can be sent, including MAC PDU bytes.
+#[derive(PartialEq)]
+pub enum MaximumFrameLength {
+    /// IEEE compatible
+    Standard127,
+    /// Proprieatry extension to 1023 bytes
+    Decawave1023,
+}

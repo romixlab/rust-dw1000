@@ -75,6 +75,50 @@ impl<SPI, CS> DW1000<SPI, CS> {
         Ok(())
     }
 
+    /// Read specified number of bytes from DW1000 rx buffer
+    pub fn read_rx_buffer(&mut self, buffer: &mut [u8]) -> Result<(), Error<SPI, CS>>
+        where
+            SPI: spi::Transfer<u8> + spi::Write<u8>,
+            CS:  OutputPin,
+    {
+        let header_buffer = [ RX_BUFFER::ID ]; // bit 7 = 0 -> read, bit 6 = 0 -> no sub index
+
+        self.chip_select.set_low()
+            .map_err(|err| Error::ChipSelect(err))?;
+        // Send the header
+        self.spi.write(&header_buffer)
+            .map_err(|err| Error::Write(err))?;
+        // Read the data
+        self.spi.transfer(buffer)
+            .map_err(|err| Error::Transfer(err))?;
+        self.chip_select.set_high()
+            .map_err(|err| Error::ChipSelect(err))?;
+
+        Ok(())
+    }
+
+    /// Write specified number of bytes to DW1000 tx buffer
+    pub fn write_tx_buffer(&mut self, buffer: &[u8]) -> Result<(), Error<SPI, CS>>
+        where
+            SPI: spi::Transfer<u8> + spi::Write<u8>,
+            CS:  OutputPin,
+    {
+        let header_buffer = [ TX_BUFFER::ID | 0b1000_0000 ]; // bit 7 = 1 -> write, bit 6 = 0 -> no sub index
+
+        self.chip_select.set_low()
+            .map_err(|err| Error::ChipSelect(err))?;
+        // Send the header
+        self.spi.write(&header_buffer)
+            .map_err(|err| Error::Write(err))?;
+        // Write the data
+        self.spi.write(buffer)
+            .map_err(|err| Error::Write(err))?;
+        self.chip_select.set_high()
+            .map_err(|err| Error::ChipSelect(err))?;
+
+        Ok(())
+    }
+
     /// Reads the CIR accumulator.
     ///
     /// Starts reading from the start_index and puts all results in the buffer.
@@ -1128,14 +1172,14 @@ pub struct TX_BUFFER;
 impl Register for TX_BUFFER {
     const ID:     u8    = 0x09;
     const SUB_ID: u16   = 0x00;
-    const LEN:    usize = 127;
+    const LEN:    usize = 1023;
 }
 
 impl Writable for TX_BUFFER {
     type Write = tx_buffer::W;
 
     fn write() -> Self::Write {
-        tx_buffer::W([0; 127 + 1])
+        tx_buffer::W([0; 1023 + 1])
     }
 
     fn buffer(w: &mut Self::Write) -> &mut [u8] {
@@ -1154,7 +1198,7 @@ impl<SPI, CS> DW1000<SPI, CS> {
 /// Transmit Data Buffer
 pub mod tx_buffer {
     /// Used to write to the register
-    pub struct W(pub(crate) [u8; 127 + 1]);
+    pub struct W(pub(crate) [u8; 1023 + 1]);
 
     impl W {
         /// Provides write access to the buffer contents
@@ -1287,41 +1331,41 @@ impl_bytes! {
 
 impl fmt::Display for sys_status::R {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "sys_status:(");
-        if self.irqs() == 0b1 { write!(f, "irqs | "); }
-        if self.cplock() == 0b1 { write!(f, "cplock | "); }
-        if self.esyncr() == 0b1 { write!(f, "esyncr | "); }
-        if self.aat() == 0b1 { write!(f, "aat | "); }
-        if self.txfrb() == 0b1 { write!(f, "txfrb | "); }
-        if self.txprs() == 0b1 { write!(f, "txprs | "); }
-        if self.txphs() == 0b1 { write!(f, "txphs | "); }
-        if self.txfrs() == 0b1 { write!(f, "txfrs | "); }
-        if self.rxprd() == 0b1 { write!(f, "rxprd | "); }
-        if self.rxsfdd() == 0b1 { write!(f, "rxsfdd | "); }
-        if self.ldedone() == 0b1 { write!(f, "ldedone | "); }
-        if self.rxphd() == 0b1 { write!(f, "rxphd | "); }
-        if self.rxphe() == 0b1 { write!(f, "rxphe | "); }
-        if self.rxdfr() == 0b1 { write!(f, "rxdfr | "); }
-        if self.rxfcg() == 0b1 { write!(f, "rxfcg | "); }
-        if self.rxfce() == 0b1 { write!(f, "rxfce | "); }
-        if self.rxrfsl() == 0b1 { write!(f, "rxrfsl | "); }
-        if self.rxrfto() == 0b1 { write!(f, "rxrfto | "); }
-        if self.ldeerr() == 0b1 { write!(f, "ldeerr | "); }
-        if self.rxovrr() == 0b1 { write!(f, "rxovrr | "); }
-        if self.rxpto() == 0b1 { write!(f, "rxpto | "); }
-        if self.gpioirq() == 0b1 { write!(f, "gpioirq | "); }
-        if self.slp2init() == 0b1 { write!(f, "slp2init | "); }
-        if self.rfpll_ll() == 0b1 { write!(f, "rfpll_ll | "); }
-        if self.clkpll_ll() == 0b1 { write!(f, "clkpll_ll | "); }
-        if self.rxsfdto() == 0b1 { write!(f, "rxsfdto | "); }
-        if self.hpdwarn() == 0b1 { write!(f, "hpdwarn | "); }
-        if self.txberr() == 0b1 { write!(f, "txberr | "); }
-        if self.affrej() == 0b1 { write!(f, "affrej | "); }
-        if self.hsrbp() == 0b1 { write!(f, "hsrbp | "); }
-        if self.icrbp() == 0b1 { write!(f, "icrbp | "); }
-        if self.rxrscs() == 0b1 { write!(f, "rxrscs | "); }
-        if self.rxprej() == 0b1 { write!(f, "rxprej | "); }
-        if self.txpute() == 0b1 { write!(f, "txpute | "); }
+        let _ = write!(f, "sys_status:(");
+        if self.irqs() == 0b1 { let _ = write!(f, "irqs | "); }
+        if self.cplock() == 0b1 { let _ = write!(f, "cplock | "); }
+        if self.esyncr() == 0b1 { let _ = write!(f, "esyncr | "); }
+        if self.aat() == 0b1 { let _ = write!(f, "aat | "); }
+        if self.txfrb() == 0b1 { let _ = write!(f, "txfrb | "); }
+        if self.txprs() == 0b1 { let _ = write!(f, "txprs | "); }
+        if self.txphs() == 0b1 { let _ = write!(f, "txphs | "); }
+        if self.txfrs() == 0b1 { let _ = write!(f, "txfrs | "); }
+        if self.rxprd() == 0b1 { let _ = write!(f, "rxprd | "); }
+        if self.rxsfdd() == 0b1 { let _ = write!(f, "rxsfdd | "); }
+        if self.ldedone() == 0b1 { let _ = write!(f, "ldedone | "); }
+        if self.rxphd() == 0b1 { let _ = write!(f, "rxphd | "); }
+        if self.rxphe() == 0b1 { let _ = write!(f, "rxphe | "); }
+        if self.rxdfr() == 0b1 { let _ = write!(f, "rxdfr | "); }
+        if self.rxfcg() == 0b1 { let _ = write!(f, "rxfcg | "); }
+        if self.rxfce() == 0b1 { let _ = write!(f, "rxfce | "); }
+        if self.rxrfsl() == 0b1 { let _ = write!(f, "rxrfsl | "); }
+        if self.rxrfto() == 0b1 { let _ = write!(f, "rxrfto | "); }
+        if self.ldeerr() == 0b1 { let _ = write!(f, "ldeerr | "); }
+        if self.rxovrr() == 0b1 { let _ = write!(f, "rxovrr | "); }
+        if self.rxpto() == 0b1 { let _ = write!(f, "rxpto | "); }
+        if self.gpioirq() == 0b1 { let _ = write!(f, "gpioirq | "); }
+        if self.slp2init() == 0b1 { let _ = write!(f, "slp2init | "); }
+        if self.rfpll_ll() == 0b1 { let _ = write!(f, "rfpll_ll | "); }
+        if self.clkpll_ll() == 0b1 { let _ = write!(f, "clkpll_ll | "); }
+        if self.rxsfdto() == 0b1 { let _ = write!(f, "rxsfdto | "); }
+        if self.hpdwarn() == 0b1 { let _ = write!(f, "hpdwarn | "); }
+        if self.txberr() == 0b1 { let _ = write!(f, "txberr | "); }
+        if self.affrej() == 0b1 { let _ = write!(f, "affrej | "); }
+        if self.hsrbp() == 0b1 { let _ = write!(f, "hsrbp | "); }
+        if self.icrbp() == 0b1 { let _ = write!(f, "icrbp | "); }
+        if self.rxrscs() == 0b1 { let _ = write!(f, "rxrscs | "); }
+        if self.rxprej() == 0b1 { let _ = write!(f, "rxprej | "); }
+        if self.txpute() == 0b1 { let _ = write!(f, "txpute | "); }
         write!(f, ")")
     }
 }
