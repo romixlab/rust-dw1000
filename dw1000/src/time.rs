@@ -16,7 +16,7 @@ pub const TIME_MAX: u64 = 0xffffffffff;
 /// Internally uses the same 40-bit timestamps that the DW1000 uses.
 ///
 /// [`DW1000::sys_time`]: ../hl/struct.DW1000.html#method.sys_time
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[repr(C)]
 pub struct Instant(u64);
 
@@ -161,6 +161,11 @@ impl Duration {
         // means the result of the multiplication fits within 38 bits, so the
         // following should never panic.
         Duration::new(nanos as u64 * 64).unwrap()
+    }
+
+    /// Convert `Duration` to nanoseconds
+    pub fn to_nanos(&self) -> u64 {
+        self.0 / 64
     }
 
     /// Returns the raw 40-bit timestamp

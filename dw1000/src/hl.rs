@@ -101,8 +101,12 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
         // Set LDE_CFG2. See user manual, section 2.5.5.5.
         self.ll.lde_cfg2().write(|w| w.value(0x1607))?;
 
+        // Disable smart power control
+        self.ll.sys_cfg().modify(|_, w| w.dis_stxp(0b1))?;
         // Set TX_POWER. See user manual, section 2.5.5.6.
         self.ll.tx_power().write(|w| w.value(0x0E082848))?;
+        // MAXIMUM power (for testing only)
+        //self.ll.tx_power().write(|w| w.value(0x1F1F1F1F))?;
 
         // Set RF_TXCTRL. See user manual, section 2.5.5.7.
         self.ll.rf_txctrl().modify(|_, w|
@@ -240,8 +244,7 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
             payload: data,
             footer: [0; 2],
         };
-        let mut buffer = [0u8; 1200];
-        //buffer[0] = 0x09 | 0b1000_000;
+        let mut buffer = [0u8; 1024];
         let len = frame.encode(&mut buffer, mac::WriteFooter::No);
         self.send_raw(&buffer[0..len], delayed_time, config)
     }
