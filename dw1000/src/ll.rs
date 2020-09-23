@@ -151,6 +151,30 @@ impl<SPI, CS> DW1000<SPI, CS> {
             self.spi = f(spi);
         }
     }
+
+    /// Internal function for pulling the cs low. Used for sleep wakeup.
+    pub(crate) fn assert_cs_low(&mut self) -> Result<(), Error<SPI, CS>>
+        where
+            SPI: spi::Transfer<u8> + spi::Write<u8>,
+            CS:  OutputPin,
+    {
+        self.chip_select.set_low()
+            .map_err(|err| Error::ChipSelect(err))?;
+
+        Ok(())
+    }
+
+    /// Internal function for pulling the cs high. Used for sleep wakeup.
+    pub(crate) fn assert_cs_high(&mut self) -> Result<(), Error<SPI, CS>>
+        where
+            SPI: spi::Transfer<u8> + spi::Write<u8>,
+            CS:  OutputPin,
+    {
+        self.chip_select.set_high()
+            .map_err(|err| Error::ChipSelect(err))?;
+
+        Ok(())
+    }
 }
 
 
@@ -176,10 +200,16 @@ impl<'s, R, SPI, CS> RegAccessor<'s, R, SPI, CS>
 
         init_header::<R>(false, &mut buffer);
 
-        self.0.chip_select.set_low()
-            .map_err(|err| Error::ChipSelect(err))?;
+        for _ in 0..100 {
+            self.0.chip_select.set_low()
+                .map_err(|err| Error::ChipSelect(err))?;
+        }
         self.0.spi.transfer(buffer)
             .map_err(|err| Error::Transfer(err))?;
+        for _ in 0..100 {
+            self.0.chip_select.set_low()
+                .map_err(|err| Error::ChipSelect(err))?;
+        }
         self.0.chip_select.set_high()
             .map_err(|err| Error::ChipSelect(err))?;
 
@@ -199,10 +229,16 @@ impl<'s, R, SPI, CS> RegAccessor<'s, R, SPI, CS>
         let buffer = R::buffer(&mut w);
         init_header::<R>(true, buffer);
 
-        self.0.chip_select.set_low()
-            .map_err(|err| Error::ChipSelect(err))?;
+        for _ in 0..100 {
+            self.0.chip_select.set_low()
+                .map_err(|err| Error::ChipSelect(err))?;
+        }
         <SPI as spi::Write<u8>>::write(&mut self.0.spi, buffer)
             .map_err(|err| Error::Write(err))?;
+        for _ in 0..100 {
+            self.0.chip_select.set_low()
+                .map_err(|err| Error::ChipSelect(err))?;
+        }
         self.0.chip_select.set_high()
             .map_err(|err| Error::ChipSelect(err))?;
 
@@ -228,10 +264,16 @@ impl<'s, R, SPI, CS> RegAccessor<'s, R, SPI, CS>
         let buffer = <R as Writable>::buffer(&mut w);
         init_header::<R>(true, buffer);
 
-        self.0.chip_select.set_low()
-            .map_err(|err| Error::ChipSelect(err))?;
+        for _ in 0..100 {
+            self.0.chip_select.set_low()
+                .map_err(|err| Error::ChipSelect(err))?;
+        }
         <SPI as spi::Write<u8>>::write(&mut self.0.spi, buffer)
             .map_err(|err| Error::Write(err))?;
+        for _ in 0..100 {
+            self.0.chip_select.set_low()
+                .map_err(|err| Error::ChipSelect(err))?;
+        }
         self.0.chip_select.set_high()
             .map_err(|err| Error::ChipSelect(err))?;
 
@@ -782,7 +824,7 @@ impl_register! {
         hrbpt,     24, 24, u8; /// Host Side RX Buffer Pointer Toggle
     }
     0x0E, 0x00, 4, RW, SYS_MASK(sys_mask) { /// System Event Mask Register
-        mpclock,    1,  1, u8; /// Mask clock PLL lock
+        mcplock,    1,  1, u8; /// Mask clock PLL lock
         mesyncr,    2,  2, u8; /// Mask external sync clock reset
         maat,       3,  3, u8; /// Mask automatic acknowledge trigger
         mtxfrbm,    4,  4, u8; /// Mask transmit frame begins
@@ -913,6 +955,12 @@ impl_register! {
         pllldt,  2,  2, u8; /// Clock PLL Lock Detect Tune
         wait,    3, 10, u8; /// Wait Counter
         ostrm,  11, 11, u8; /// External Timebase Reset Mode Enable
+    }
+    0x24, 0x04, 4, RO, EC_RXTC(ec_rxtc) { /// External clock synchronisation counter captured on RMARKER
+        rx_ts_est, 0, 31, u32; /// External clock synchronisation counter captured on RMARKER
+    }
+    0x24, 0x04, 4, RO, EC_GOLP(ec_golp) { /// External clock offset to first path 1 GHz counter
+        offset_ext, 0, 5, u8; /// This register contains the 1 GHz count from the arrival of the RMARKER and the next edge of the external clock.
     }
     0x26, 0x00, 4, RW, GPIO_MODE(gpio_mode) { /// GPIO Mode Control Register
         msgp0,  6,  7, u8; /// Mode Selection for GPIO0/RXOKLED
@@ -1077,6 +1125,12 @@ impl_register! {
         txmq,    9, 11, u8; /// Transmit mixer Q-factor tuning register
         value, 0, 23, u32; /// The entire register
     }
+    0x28, 0x2C, 4, RO, RF_STATUS(rf_status) { /// RF Status Register
+        cplllock,  0, 0, u8; /// Clock PLL lock status
+        cplllow,   1, 1, u8; /// Clock PLL low flag
+        cpllhigh,  2, 2, u8; /// Clock PLL high flag
+        rfplllock, 3, 3, u8; /// RF PLL lock status
+    }
     0x28, 0x30, 5, RW, LDOTUNE(ldotune) { /// LDO voltage tuning parameter
         value, 0, 39, u64; /// Internal LDO voltage tuning parameter
     }
@@ -1088,6 +1142,37 @@ impl_register! {
     }
     0x2B, 0x0B, 1, RW, FS_PLLTUNE(fs_plltune) { /// Frequency synth - PLL Tuning
         value, 0, 7, u8; /// Frequency synthesiser - PLL Tuning
+    }
+    0x2C, 0x00, 2, RW, AON_WCFG(aon_wcfg) { /// AON Wakeup Configuration Register
+        onw_radc,  0,  0, u8; /// On Wake-up Run the (temperature and voltage) Analog-to-Digital Convertors.
+        onw_rx,    1,  1, u8; /// On Wake-up turn on the Receiver.
+        onw_leui,  3,  3, u8; /// On Wake-up load the EUI from OTP memory into Register file: 0x01 – Extended Unique Identifier.
+        onw_ldc,   6,  6, u8; /// On Wake-upload configurations from the AON memory into the host interface register set.
+        onw_l64p,  7,  7, u8; /// On Wake-up load the Length64 receiver operating parameter set.
+        pres_sleep,8,  8, u8; /// Preserve  Sleep. This bit determines what the DW1000 does with respect to the ARXSLP and ATXSLPsleep controls in Sub-Register 0x36:04 –PMSC_CTRL1after a wake-up event.
+        onw_llde, 11, 11, u8; /// On Wake-up load the LDE microcode
+        onw_lld0, 12, 12, u8; /// On Wake-up load the LDOTUNE value from OTP
+    }
+    0x2C, 0x02, 1, RW, AON_CTRL(aon_ctrl) { /// AON Control Register
+        restore,  0, 0, u8; /// When this bit is set the DW1000 will copy the user configurations from the AON memory to the host interface register set.
+        save,     1, 1, u8; /// When this bit is set the DW1000 will copy the user configurations from the host interface register  set  into  the AON  memory.
+        upl_cfg,  2, 2, u8; /// Upload the AON block configurations to the AON. 
+        dca_read, 3, 3, u8; /// Direct AON memory access read.
+        dca_enab, 7, 7, u8; /// Direct AON memory access enable bit.
+    }
+    0x2C, 0x06, 4, RW, AON_CFG0(aon_cfg0) { /// AON Configuration Register 0
+        sleep_en, 0, 0, u8; /// Sleep enable configuration bit
+        wake_pin, 1, 1, u8; /// Wake using WAKEUP pin
+        wake_spi, 2, 2, u8; /// Wake using SPI access
+        wake_cnt, 3, 3, u8; /// Wake when sleep counter elapses
+        lpdiv_en, 4, 4, u8; /// Low power divider enable configuration.
+        lpclkdiva, 5, 15, u16; /// This field specifies a divider count for dividing the raw DW1000 XTAL oscillator frequency to set an LP clock frequency.
+        sleep_tim, 16, 31, u16; /// Sleep time.  This field configures the sleep time count elapse value.
+    }
+    0x2C, 0x0A, 2, RW, AON_CFG1(aon_cfg1) { /// AON Configuration Register 1
+        sleep_cen, 0, 0, u8; /// This bit enables the sleep counter.
+        smxx, 1, 1, u8; /// Thisbit needs to be set to 0 for correct operation in the SLEEP state within the DW1000. 
+        lposc_cal, 2, 2, u8; /// This bit enables the calibration function that measures the period of the IC’s internal low powered oscillator.
     }
     0x2D, 0x04, 2, RW, OTP_ADDR(otp_addr) { /// OTP Address
         value, 0, 10, u16; /// OTP Address

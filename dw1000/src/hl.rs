@@ -128,15 +128,8 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
         self.ll.pmsc_ctrl0().modify(|_, w| w.sysclks(0b00))?;
 
         // Set LDOTUNE. See user manual, section 2.5.5.11.
-        self.ll.otp_addr().write(|w| w.value(0x004))?;
-        self.ll.otp_ctrl().modify(|_, w|
-            w
-                .otprden(0b1)
-                .otpread(0b1)
-        )?;
-        while self.ll.otp_ctrl().read()?.otpread() == 0b1 {}
-        let ldotune_low = self.ll.otp_rdat().read()?.value();
-        if ldotune_low != 0 {
+        let (calibrated, ldotune_low) = self.is_ldo_tune_calibrated()?;
+        if calibrated {
             self.ll.otp_addr().write(|w| w.value(0x005))?;
             self.ll.otp_ctrl().modify(|_, w|
                 w
@@ -200,6 +193,41 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
         Ok(())
     }
 
+    /// Sets up the sync pin functionality
+    ///
+    /// After init, it is set to None
+    pub fn set_sync_behaviour(&mut self, behaviour: SyncBehaviour) -> Result<(), Error<SPI, CS>> {
+        match behaviour {
+            SyncBehaviour::None => {
+                // Disable all
+                self.ll
+                    .ec_ctrl()
+                    .modify(|_, w| w.osrsm(0).ostrm(0))?;
+                // Disable the rx pll
+                self.ll.pmsc_ctrl1().modify(|_, w| w.pllsyn(0))?;
+            },
+            SyncBehaviour::TimeBaseReset => {
+                // Enable the time base reset mode
+                self.ll
+                    .ec_ctrl()
+                    .modify(|_, w| w.osrsm(0).ostrm(1))?;
+                // Disable the rx pll
+                self.ll.pmsc_ctrl1().modify(|_, w| w.pllsyn(0))?;
+            },
+            SyncBehaviour::ExternalSync => {
+                // Enable the rx pll
+                self.ll.pmsc_ctrl1().modify(|_, w| w.pllsyn(1))?;
+
+                // Enable the external receive synchronisation mode
+                self.ll
+                    .ec_ctrl()
+                    .modify(|_, w| w.pllldt(0b1).osrsm(1).ostrm(0))?;
+            },
+        }
+
+        Ok(())
+    }
+
     /// Send an IEEE 802.15.4 MAC frame
     ///
     /// The `data` argument is wrapped into an IEEE 802.15.4 MAC frame and sent
@@ -219,10 +247,10 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
     /// is in the `Sending` state, and can be used to wait for the transmission
     /// to finish and check its result.
     pub fn send(mut self,
-                data:         &[u8],
-                destination:  mac::Address,
-                delayed_time: Option<Instant>,
-                config: TxConfig,
+        data:         &[u8],
+        destination:  mac::Address,
+        send_time: SendTime,
+        config: TxConfig,
     )
                 -> Result<DW1000<SPI, CS, Sending>, Error<SPI, CS>>
     {
@@ -272,13 +300,23 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
         // doesn't happen.
         self.force_idle()?;
 
-        delayed_time.map(|time| {
-            self.ll
-                .dx_time()
-                .write(|w|
-                    w.value(time.value())
-                )
-        });
+        match send_time {
+            SendTime::Delayed(time) => {
+                // Put the time into the delay register
+                // By setting this register, the chip knows to delay before transmitting
+                self.ll
+                    .dx_time()
+                    .write(|w|
+                        w.value(time.value())
+                    )?;
+            },
+            SendTime::OnSync => {
+                self.ll
+                    .ec_ctrl()
+                    .modify(|_, w| w.wait(33).ostsm(1))?;
+            }
+            _ => {},
+        }
 
         // Prepare transmitter
         let len = data.len();
@@ -345,13 +383,15 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
 
         // Todo: Power control (register 0x1E)
 
-        // Start transmission
-        self.ll
-            .sys_ctrl()
-            .modify(|_, w|
-                if delayed_time.is_some() { w.txdlys(0b1) } else { w }
-                    .txstrt(0b1)
-            )?;
+        if !matches!(send_time, SendTime::OnSync) {
+            // Start transmission
+            self.ll
+                .sys_ctrl()
+                .modify(|_, w|
+                    if matches!(send_time, SendTime::Delayed(_)) { w.txdlys(0b1) } else { w }
+                        .txstrt(0b1)
+                )?;
+        }
 
         Ok(DW1000 {
             ll:    self.ll,
@@ -585,6 +625,69 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
 
         Ok(())
     }
+
+    /// Puts the dw1000 into sleep mode.
+    ///
+    /// - `irq_on_wakeup`: When set to true, the IRQ pin will be asserted when the radio wakes up
+    /// - `sleep_duration`: When `None`, the radio will not wake up by itself and go into the deep sleep mode.
+    /// When `Some`, then the radio will wake itself up after the given time. Every tick is ~431ms, but there may
+    /// be a significant deviation from this due to the chip's manufacturing process.
+    ///
+    /// *Note: The SPI speed may be at most 3 Mhz when calling this function.*
+    pub fn enter_sleep(mut self, irq_on_wakeup: bool, sleep_duration: Option<u16>)
+        -> Result<DW1000<SPI, CS, Sleeping>, Error<SPI, CS>>
+    {
+        let tx_antenna_delay = self.get_tx_antenna_delay()?;
+        let sys_mask = self.ll.sys_mask().read()?;
+
+        let lld0 = self.is_ldo_tune_calibrated()?.0 as u8;
+
+        // Setup everything that needs to be stored in AON
+        self.ll.aon_wcfg().modify(|_, w| w
+            .onw_leui(1)
+            .onw_ldc(1)
+            .pres_sleep(1)
+            .onw_llde(1)
+            .onw_lld0(lld0)
+        )?;
+        // Now set the sleep_cen 0.
+        self.ll.aon_cfg1().modify(|_, w| w.sleep_cen(0))?;
+        // Setup the wakeup sources.
+        self.ll.aon_cfg0().modify(|_, w| w
+            .wake_spi(1)
+            .wake_cnt(sleep_duration.is_some() as u8)
+        )?;
+
+        // Setup the interrupt.
+        if irq_on_wakeup {
+            self.ll.sys_mask().modify(|_, w| w.mslp2init(1).mcplock(1))?;
+        }
+
+        if let Some(sd) = sleep_duration {
+            self.ll.aon_ctrl().modify(|_, w| w.upl_cfg(1))?;
+            self.ll.aon_cfg0().modify(|_, w| w.sleep_tim(sd))?;
+            self.ll.aon_cfg1().modify(|_, w| w.sleep_cen(1))?;
+            self.ll.aon_ctrl().modify(|_, w| w.upl_cfg(1))?;
+        }
+
+        // Set SMXX 0
+        self.ll.aon_cfg1().modify(|_, w| w.smxx(0))?;
+
+        // Set sleep_en 1
+        self.ll.aon_cfg0().modify(|_, w| w.sleep_en(1))?;
+
+        // Last, set UPL_CFG to 1 and DCA_ENAB to 0
+        self.ll.aon_ctrl().modify(|_, w| w.upl_cfg(1).dca_enab(0))?;
+
+        Ok(DW1000 {
+            ll:    self.ll,
+            seq:   self.seq,
+            state: Sleeping {
+                tx_antenna_delay,
+                sys_mask,
+            },
+        })
+    }
 }
 
 impl<SPI, CS> DW1000<SPI, CS, Sending>
@@ -672,6 +775,14 @@ impl<SPI, CS> DW1000<SPI, CS, Sending>
                 Ok(())     => (),
                 Err(error) => return Err((self, error)),
             }
+        }
+
+        // Turn off the external transmit synchronization
+        match self.ll
+            .ec_ctrl()
+            .modify(|_, w| w.ostsm(0)) {
+            Ok(_) => {}
+            Err(e) => return Err((self, Error::Spi(e))),
         }
 
         Ok(DW1000 {
@@ -956,10 +1067,6 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
     ///
     /// This must be called after the [`DW1000::wait`] function has successfully returned.
     pub fn read_rx_quality(&mut self) -> Result<RxQuality, Error<SPI, CS>> {
-        if !self.state.finished {
-            return Err(Error::RxNotFinished);
-        }
-
         let luep = self.calculate_luep()?;
         let prnlos = self.calculate_prnlos()?;
         let mc = self.calculate_mc()?;
@@ -980,6 +1087,20 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
                 rssi,
             }
         )
+    }
+
+    /// Gets the external sync values from the registers.
+    ///
+    /// The tuple contains (cycles_since_sync, nanos_until_tick, raw_timestamp).
+    /// See the user manual at 6.1.3 to see how to calculate the actual time value.
+    /// In the manual, the return values are named (N, T1, RX_RAWST)
+    /// This is left to the user so the precision of the calculations are left to the user to decide.
+    pub fn read_external_sync_time(&mut self) -> Result<(u32, u8, u64), Error<SPI, CS>> {
+        let cycles_since_sync = self.ll().ec_rxtc().read()?.rx_ts_est();
+        let nanos_until_tick = self.ll().ec_golp().read()?.offset_ext();
+        let raw_timestamp = self.ll().rx_time().read()?.rx_rawst();
+
+        Ok((cycles_since_sync, nanos_until_tick, raw_timestamp))
     }
 
     /// Finishes receiving and returns to the `Ready` state
@@ -1011,6 +1132,7 @@ impl<SPI, CS, State> DW1000<SPI, CS, State>
     where
         SPI: spi::Transfer<u8> + spi::Write<u8>,
         CS:  OutputPin,
+        State: Awake,
 {
     /// Returns the TX antenna delay
     pub fn get_tx_antenna_delay(&mut self)
@@ -1022,6 +1144,18 @@ impl<SPI, CS, State> DW1000<SPI, CS, State>
         let tx_antenna_delay = Duration::new(tx_antenna_delay.into()).unwrap();
 
         Ok(tx_antenna_delay)
+    }
+
+    /// Returns the RX antenna delay
+    pub fn get_rx_antenna_delay(&mut self)
+        -> Result<Duration, Error<SPI, CS>>
+    {
+        let rx_antenna_delay = self.ll.lde_rxantd().read()?.value();
+
+        // Since `rx_antenna_delay` is `u16`, the following will never panic.
+        let rx_antenna_delay = Duration::new(rx_antenna_delay.into()).unwrap();
+
+        Ok(rx_antenna_delay)
     }
 
     /// Returns the network id and address used for sending and receiving
@@ -1065,6 +1199,65 @@ impl<SPI, CS, State> DW1000<SPI, CS, State>
         while self.ll.sys_ctrl().read()?.trxoff() == 0b1 {}
 
         Ok(())
+    }
+
+    /// Checks whether the ldo tune is calibrated.
+    ///
+    /// The bool in the tuple is the answer and the int is the raw ldotune_low value.
+    fn is_ldo_tune_calibrated(&mut self) -> Result<(bool, u32), Error<SPI, CS>> {
+        self.ll.otp_addr().write(|w| w.value(0x004))?;
+        self.ll.otp_ctrl().modify(|_, w|
+            w
+                .otprden(0b1)
+                .otpread(0b1)
+        )?;
+        while self.ll.otp_ctrl().read()?.otpread() == 0b1 {}
+        let ldotune_low = self.ll.otp_rdat().read()?.value();
+        Ok((ldotune_low != 0, ldotune_low))
+    }
+}
+
+impl<SPI, CS> DW1000<SPI, CS, Sleeping>
+    where
+        SPI: spi::Transfer<u8> + spi::Write<u8>,
+        CS:  OutputPin,
+{
+    /// Wakes the radio up.
+    pub fn wake_up<DELAY: embedded_hal::blocking::delay::DelayUs<u16>>(mut self, delay: &mut DELAY) -> Result<DW1000<SPI, CS, Ready>, Error<SPI, CS>> {
+        // Wake up using the spi
+        self.ll.assert_cs_low().map_err(|e| Error::Spi(e))?;
+        delay.delay_us(500);
+        self.ll.assert_cs_high().map_err(|e| Error::Spi(e))?;
+
+        // Now we must wait 4 ms so all the clocks start running.
+        delay.delay_us(4000);
+
+        // Let's check that we're actually awake now
+        if self.ll.dev_id().read()?.ridtag() != 0xDECA {
+            // Oh dear... We have not woken up!
+            return Err(Error::StillAsleep);
+        }
+
+        let original_sys_mask = self.state.sys_mask.0;
+        // Disable the interrupt
+        self.ll.sys_mask().modify(|_, w| {
+            w.0 = original_sys_mask;
+            w
+        })?;
+
+        // Reset the wakeupstatus
+        self.ll.sys_status().write(|w| w.slp2init(1).cplock(1))?;
+
+        // Restore the tx antenna delay
+        let delay = self.state.tx_antenna_delay;
+        self.ll.tx_antd().write(|w| w.value(delay.value() as u16))?;
+
+        // All other values should be restored, so return the ready radio.
+        Ok(DW1000 {
+            ll:    self.ll,
+            seq:   self.seq,
+            state: Ready,
+        })
     }
 }
 
@@ -1150,6 +1343,9 @@ pub enum Error<SPI, CS>
 
     /// The receive operation hasn't finished yet
     RxNotFinished,
+
+    /// It was expected that the radio would have woken up, but it hasn't.
+    StillAsleep,
 }
 
 impl<SPI, CS> From<ll::Error<SPI, CS>> for Error<SPI, CS>
@@ -1220,6 +1416,8 @@ impl<SPI, CS> fmt::Debug for Error<SPI, CS>
                 write!(f, "InvalidConfiguration"),
             Error::RxNotFinished =>
                 write!(f, "RxNotFinished"),
+            Error::StillAsleep =>
+                write!(f, "StillAsleep"),
         }
     }
 }
@@ -1246,6 +1444,25 @@ pub struct Receiving {
     used_config: RxConfig,
 }
 
+/// Indicates that the `DW1000` instance is currently sleeping
+#[derive(Debug)]
+pub struct Sleeping {
+    /// Tx antenna delay isn't stored in AON, so we'll do it ourselves.
+    tx_antenna_delay: Duration,
+    /// Stores the system mask register. The docs say that this is restored during wakeup, but this doesn't seem to be the case.
+    /// So let's do it ourselves.
+    sys_mask: ll::sys_mask::R,
+}
+
+/// Any state struct that implements this trait signals that the radio is **not** sleeping.
+pub trait Awake { }
+impl Awake for Uninitialized { }
+impl Awake for Ready { }
+impl Awake for Sending { }
+impl Awake for Receiving { }
+/// Any state struct that implements this trait signals that the radio is sleeping.
+pub trait Asleep { }
+impl Asleep for Sleeping { }
 
 /// An incoming message
 #[derive(Debug)]
@@ -1276,4 +1493,25 @@ pub struct RxQuality {
     /// The value is an estimation that is quite accurate up to -85 dBm.
     /// Above -85 dBm, the estimation underestimates the actual value.
     pub rssi: f32
+}
+
+/// The time at which the transmission will start
+pub enum SendTime {
+    /// As fast as possible
+    Now,
+    /// After some time
+    Delayed(Instant),
+    /// After the sync pin is engaged. (Only works when sync setup is in ExternalSync mode)
+    OnSync,
+}
+
+/// The behaviour of the sync pin
+pub enum SyncBehaviour {
+    /// The sync pin does nothing
+    None,
+    /// The radio time will reset to 0 when the sync pin is high and the clock gives a rising edge
+    TimeBaseReset,
+    /// When receiving, instead of reading the internal timestamp, the time since the last sync
+    /// is given back.
+    ExternalSync,
 }
