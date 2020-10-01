@@ -65,7 +65,7 @@ use crate::hl::SendTime;
 /// This defines the transmission delay as 10 ms. This should be enough to
 /// finish the rest of the preparation and send the message, even if we're
 /// running with unoptimized code.
-const TX_DELAY: u32 = 10_000_000;
+//const TX_DELAY: u32 = 10_000_000; // Too long, replaced with processing_delay argument
 
 
 /// Implemented by all ranging messages
@@ -225,13 +225,13 @@ impl Ping {
     /// time to 10 milliseconds in the future. Make sure to send the message
     /// within that time frame, or the distance measurement will be negatively
     /// affected.
-    pub fn new<SPI, CS>(dw1000: &mut DW1000<SPI, CS, Ready>)
+    pub fn new<SPI, CS>(dw1000: &mut DW1000<SPI, CS, Ready>, processing_delay: Duration)
         -> Result<TxMessage<Self>, Error<SPI, CS>>
         where
             SPI: spi::Transfer<u8> + spi::Write<u8>,
             CS:  OutputPin,
     {
-        let tx_time = dw1000.sys_time()? + Duration::from_nanos(TX_DELAY);
+        let tx_time = dw1000.sys_time()? + processing_delay;
         let ping_tx_time = tx_time + dw1000.get_tx_antenna_delay()?;
 
         let payload = Ping {
@@ -281,13 +281,14 @@ impl Request {
     pub fn new<SPI, CS>(
         dw1000: &mut DW1000<SPI, CS, Ready>,
         ping:   &RxMessage<Ping>,
+        processing_delay: Duration
     )
         -> Result<TxMessage<Self>, Error<SPI, CS>>
         where
             SPI: spi::Transfer<u8> + spi::Write<u8>,
             CS:  OutputPin,
     {
-        let tx_time = dw1000.sys_time()? + Duration::from_nanos(TX_DELAY);
+        let tx_time = dw1000.sys_time()? + processing_delay;
         let request_tx_time = tx_time + dw1000.get_tx_antenna_delay()?;
 
         let ping_reply_time = request_tx_time.duration_since(ping.rx_time);
@@ -345,13 +346,14 @@ impl Response {
     pub fn new<SPI, CS>(
         dw1000:  &mut DW1000<SPI, CS, Ready>,
         request: &RxMessage<Request>,
+        processing_delay: Duration
     )
         -> Result<TxMessage<Self>, Error<SPI, CS>>
         where
             SPI: spi::Transfer<u8> + spi::Write<u8>,
             CS:  OutputPin,
     {
-        let tx_time = dw1000.sys_time()? + Duration::from_nanos(TX_DELAY);
+        let tx_time = dw1000.sys_time()? + processing_delay;
         let response_tx_time = tx_time + dw1000.get_tx_antenna_delay()?;
 
         let ping_round_trip_time =

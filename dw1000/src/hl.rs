@@ -50,6 +50,18 @@ pub struct DW1000<SPI, CS, State> {
     max_frame_len: MaximumFrameLength,
 }
 
+/// Device version and tag check status, use for SPI communication test.
+pub struct DeviceInfo {
+    /// true if RIDTAG == 0xDECA
+    pub tag_is_correct: bool,
+    /// Deivce model, 0x01 for DW1000
+    pub model: u8,
+    /// Major version
+    pub version: u8,
+    /// Minor version
+    pub revision: u8
+}
+
 impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
     where
         SPI: spi::Transfer<u8> + spi::Write<u8>,
@@ -71,6 +83,18 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
             state: Uninitialized,
             max_frame_len: MaximumFrameLength::Standard127
         }
+    }
+
+    /// Get device info.
+    pub fn device_info(&mut self) -> Result<DeviceInfo, Error<SPI, CS>> {
+        let dev_id = self.ll.dev_id().read()?;
+        let tag = dev_id.ridtag();
+        Ok(DeviceInfo {
+            tag_is_correct: tag == 0xDECA,
+            model: dev_id.model(),
+            version: dev_id.ver(),
+            revision: dev_id.rev()
+        })
     }
 
     /// Initialize the DW1000
@@ -107,6 +131,8 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
         self.ll.tx_power().write(|w| w.value(0x0E082848))?;
         // MAXIMUM power (for testing only)
         //self.ll.tx_power().write(|w| w.value(0x1F1F1F1F))?;
+        // MINIMUM power (for testing only)
+        //self.ll.tx_power().write(|w| w.value(0xC0C0C0C0))?;
 
         // Set RF_TXCTRL. See user manual, section 2.5.5.7.
         self.ll.rf_txctrl().modify(|_, w|
@@ -149,6 +175,20 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
                     .phr_mode(0b11)
             )?;
         }
+
+        // Set PLLLDT right awway, to check if we can inrease the SPI speed and if the part is healthy.
+        self.ll
+            .ec_ctrl()
+            .modify(|_, w|
+                w.pllldt(0b1)
+            )?;
+        self.ll
+            .sys_status()
+            .write(|w|
+                w
+                    .cplock(0b1)
+                    .clkpll_ll(0b1)
+            )?;
 
         Ok(DW1000 {
             ll:    self.ll,
@@ -274,14 +314,14 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
         };
         let mut buffer = [0u8; 1024];
         let len = frame.encode(&mut buffer, mac::WriteFooter::No);
-        self.send_raw(&buffer[0..len], delayed_time, config)
+        self.send_raw(&buffer[0..len], send_time, config)
     }
 
     /// Send raw data
     pub fn send_raw(mut self,
-                data:         &[u8],
-                delayed_time: Option<Instant>,
-                config: TxConfig,
+        data:         &[u8],
+        send_time: SendTime,
+        config: TxConfig,
     )
                 -> Result<DW1000<SPI, CS, Sending>, Error<SPI, CS>>
     {
@@ -686,6 +726,7 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
                 tx_antenna_delay,
                 sys_mask,
             },
+            max_frame_len: self.max_frame_len
         })
     }
 }
@@ -875,6 +916,13 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
         }
 
         // Frame is ready. Continue.
+
+        // Wait until LDE processing is done. Before this is finished, the RX
+        // time stamp is not available.
+        if sys_status.ldedone() == 0b0 {
+            return Err(nb::Error::WouldBlock);
+        }
+
         // Clear all receive status bits [from deca_device.c]
         self.ll()
             .sys_status()
@@ -889,12 +937,6 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
             )
             .map_err(|error| nb::Error::Other(Error::Spi(error)))?;
 
-
-        // Wait until LDE processing is done. Before this is finished, the RX
-        // time stamp is not available.
-        if sys_status.ldedone() == 0b0 {
-            return Err(nb::Error::WouldBlock);
-        }
         let rx_time = self.ll()
             .rx_time()
             .read()
@@ -1257,6 +1299,7 @@ impl<SPI, CS> DW1000<SPI, CS, Sleeping>
             ll:    self.ll,
             seq:   self.seq,
             state: Ready,
+            max_frame_len: self.max_frame_len
         })
     }
 }
