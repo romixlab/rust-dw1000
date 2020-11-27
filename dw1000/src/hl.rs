@@ -638,7 +638,11 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
         enable_sfd: bool,
         enable_rx: bool,
         enable_tx: bool,
-        blink_time: u8)
+        blink_time: u8,
+        extpa: bool,
+        exttxe: bool,
+        extrxe: bool
+    )
         -> Result<(), Error<SPI, CS>> {
         // Turn on the timer that will control the blinking (The debounce clock)
         self.ll.pmsc_ctrl0().modify(|_, w| {
@@ -661,6 +665,9 @@ impl<SPI, CS> DW1000<SPI, CS, Ready>
                 .msgp1(enable_sfd as u8)
                 .msgp2(enable_rx as u8)
                 .msgp3(enable_tx as u8)
+                .msgp4(extpa as u8)
+                .msgp5(exttxe as u8)
+                .msgp6(extrxe as u8)
         })?;
 
         Ok(())
