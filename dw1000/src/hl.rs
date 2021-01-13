@@ -62,6 +62,122 @@ pub struct DeviceInfo {
     pub revision: u8
 }
 
+/// Coarse (DA) gain control. Be careful with maximum gain, see user manual.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[allow(missing_docs)]
+pub enum CoarsePowerGain {
+    NoOutput = 0b111,
+    _0dB     = 0b110,
+    _2dB5    = 0b101,
+    _5dB     = 0b100,
+    _7dB5    = 0b011,
+    _10dB    = 0b010,
+    _12dB5   = 0b001,
+    _15dB    = 0b000
+}
+
+/// Fine (mixer) gain control.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[allow(missing_docs)]
+pub enum FinePowerGain {
+    _0dB = 0b00000,
+    _0dB5 = 0b00001,
+    _1dB = 0b00010,
+    _1dB5 = 0b00011,
+    _2dB = 0b00100,
+    _2dB5 = 0b00101,
+    _3dB = 0b00110,
+    _3dB5 = 0b00111,
+    _4dB = 0b01000,
+    _4dB5 = 0b01001,
+    _5dB = 0b01010,
+    _5dB5 = 0b01011,
+    _6dB = 0b01100,
+    _6dB5 = 0b01101,
+    _7dB = 0b01110,
+    _7dB5 = 0b01111,
+    _8dB = 0b10000,
+    _8dB5 = 0b10001,
+    _9dB = 0b10010,
+    _9dB5 = 0b10011,
+    _10dB = 0b10100,
+    _10dB5 = 0b10101,
+    _11dB = 0b10110,
+    _11dB5 = 0b10111,
+    _12dB = 0b11000,
+    _12dB5 = 0b11001,
+    _13dB = 0b11010,
+    _13dB5 = 0b11011,
+    _14dB = 0b11100,
+    _14dB5 = 0b11101,
+    _15dB = 0b11110,
+    _15dB5 = 0b11111,
+}
+
+/// 2 or 4 of these control tx power in different conditions.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct PowerGain {
+    /// Coarse (DA) gain.
+    pub coarse: CoarsePowerGain,
+    /// Fine (mixer) gain.
+    pub fine: FinePowerGain
+}
+
+impl PowerGain {
+    /// Return bit representation
+    pub fn bits(&self) -> u8 {
+        ((self.coarse as u8) << 5) | (self.fine as u8)
+    }
+}
+
+/// Change power depending on the message air time.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct SmartPowerGain {
+    /// Power setting when air time is < 125ms
+    pub boostp125: PowerGain,
+    /// Power setting when air time is < 250ms
+    pub boostp250: PowerGain,
+    /// Power setting when air time is < 500ms
+    pub boostp500: PowerGain,
+    /// Power setting when air time is > 500ms
+    pub boostnorm: PowerGain
+}
+
+/// Manual power regardless of message air time.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct ManualPowerGain {
+    /// PHR header power setting
+    pub phy_header: PowerGain,
+    /// SHR and data power setting
+    pub shr_and_data: PowerGain
+}
+
+/// Full set of tx power control.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TxPowerControl {
+    /// Change power depending on frame air time
+    Smart(SmartPowerGain),
+    /// Constant tx power
+    Manual(ManualPowerGain)
+}
+
+impl TxPowerControl {
+    /// Return bit representation
+    pub fn bits(&self) -> u32 {
+        match self {
+            TxPowerControl::Smart(s) => {
+                ((s.boostp125.bits() as u32) << 24)     |
+                    ((s.boostp250.bits() as u32) << 16) |
+                    ((s.boostp500.bits() as u32) << 8)  |
+                    (s.boostnorm.bits() as u32)
+            },
+            TxPowerControl::Manual(m) => {
+                (0x0E) | ((m.shr_and_data.bits() as u32) << 16) | ((m.phy_header.bits() as u32) << 8) | (0x22)
+            }
+        }
+    }
+}
+
 impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
     where
         SPI: spi::Transfer<u8> + spi::Write<u8>,
@@ -107,7 +223,11 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
     /// Please note that this method assumes that you kept the default
     /// configuration. It is generally recommended not to change configuration
     /// before calling this method.
-    pub fn init(mut self, max_frame_len: MaximumFrameLength) -> Result<DW1000<SPI, CS, Ready>, Error<SPI, CS>> {
+    pub fn init(
+        mut self,
+        tx_power_control: TxPowerControl,
+        max_frame_len: MaximumFrameLength
+    ) -> Result<DW1000<SPI, CS, Ready>, Error<SPI, CS>> {
         // Set AGC_TUNE1. See user manual, section 2.5.5.1.
         self.ll.agc_tune1().write(|w| w.value(0x8870))?;
 
@@ -126,13 +246,18 @@ impl<SPI, CS> DW1000<SPI, CS, Uninitialized>
         self.ll.lde_cfg2().write(|w| w.value(0x1607))?;
 
         // Disable smart power control
-        self.ll.sys_cfg().modify(|_, w| w.dis_stxp(0b1))?;
+        let disable_smart_pc = match tx_power_control {
+            TxPowerControl::Smart(_) => 0b0,
+            TxPowerControl::Manual(_) => 0b1
+        };
+        self.ll.sys_cfg().modify(|_, w| w.dis_stxp(disable_smart_pc))?;
         // Set TX_POWER. See user manual, section 2.5.5.6.
-        self.ll.tx_power().write(|w| w.value(0x0E082848))?;
+        // self.ll.tx_power().write(|w| w.value(0x0E082848))?;
         // MAXIMUM power (for testing only)
-        //self.ll.tx_power().write(|w| w.value(0x1F1F1F1F))?;
+        // self.ll.tx_power().write(|w| w.value(0x1F1F1F1F))?;
         // MINIMUM power (for testing only)
         //self.ll.tx_power().write(|w| w.value(0xC0C0C0C0))?;
+        self.ll.tx_power().write(|w| w.value(tx_power_control.bits()))?;
 
         // Set RF_TXCTRL. See user manual, section 2.5.5.7.
         self.ll.rf_txctrl().modify(|_, w|
