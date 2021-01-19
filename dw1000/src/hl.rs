@@ -1222,7 +1222,9 @@ impl<SPI, CS> DW1000<SPI, CS, Receiving>
         Ok(fp_ampl1.max(fp_ampl2).max(fp_ampl3) as f32 / peak_path_amplitude as f32)
     }
 
-    fn calculate_rssi(&mut self) -> Result<f32, Error<SPI, CS>> {
+    /// Reads RSSI
+    /// This must be called after the [`DW1000::wait`] function has successfully returned.
+    pub fn calculate_rssi(&mut self) -> Result<f32, Error<SPI, CS>> {
         let c = self.ll.rx_fqual().read()?.cir_pwr() as f32;
         let a = match self.state.used_config.pulse_repetition_frequency {
             crate::configs::PulseRepetitionFrequency::Mhz16 => 113.77,
